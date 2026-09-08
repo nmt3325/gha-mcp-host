@@ -181,3 +181,7 @@ once, the questions the design rests on:
 M1: shell only -- `env_create`, `env_status`, `env_list`, `env_destroy`,
 `env_extend`, `exec`, `exec_read`, `exec_kill`. File editing in M1 is
 `exec` + base64 + `git apply`; dedicated edit tools come in M2.
+
+## File and image tools
+
+See [FILE_TOOLS.md](FILE_TOOLS.md) for image input, directory/search tools, batch reads, exact edit previews, result recovery and client-compatibility limits.

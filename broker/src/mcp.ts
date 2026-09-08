@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server"
 import type { ZodTypeAny } from "zod"
+import { toMcpResult } from "./media-result"
 
 export const SERVER_INFO = { name: "gha-mcp", version: "0.2.0" }
 
@@ -63,14 +64,7 @@ export type ToolDef = {
  * exact schema. That refactor plus outputSchema is M2; the zod major is no
  * longer an open question, since the build resolves zod 4.
  */
-function toResult(payload: Record<string, unknown>) {
-	const failed = payload.ok === false
-	return {
-		content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-		structuredContent: payload,
-		...(failed ? { isError: true } : {}),
-	}
-}
+const toResult = toMcpResult
 
 function register(server: McpServer, def: ToolDef): void {
 	server.registerTool(

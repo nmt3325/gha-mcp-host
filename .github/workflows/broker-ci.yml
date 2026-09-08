@@ -3,9 +3,9 @@ name: broker-ci
 on:
   push:
     branches: [main]
-    paths: ["broker/**", ".github/workflows/broker-ci.yml"]
+    paths: ["broker/**", "lib/**", "agent.mjs", "test/**", ".github/workflows/broker-ci.yml"]
   pull_request:
-    paths: ["broker/**", ".github/workflows/broker-ci.yml"]
+    paths: ["broker/**", "lib/**", "agent.mjs", "test/**", ".github/workflows/broker-ci.yml"]
   workflow_dispatch:
 
 permissions:
@@ -40,10 +40,9 @@ jobs:
       - name: typecheck
         run: npx tsc --noEmit
 
-      # GATE 2 - unit tests. --passWithNoTests keeps this green while the suite
-      # is still being written; drop the flag once test/unit/ lands.
+      # GATE 2 - native-media boundary tests; an empty suite is not green.
       - name: unit tests
-        run: npx vitest run --passWithNoTests
+        run: npx vitest run
 
       # GATE 3 - the exact defect that once shipped a tree that could not
       # compile: bytes.ts exports safeCut(). There has never been a cutSafe().
@@ -94,3 +93,18 @@ jobs:
 
       - name: dry-run bundle (no upload)
         run: npx wrangler deploy --dry-run --outdir dist
+
+  selfhost-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: npm ci --prefix broker/selfhost --no-audit --no-fund
+      - run: npm run build --prefix broker/selfhost
+      - run: npm test --prefix broker/selfhost

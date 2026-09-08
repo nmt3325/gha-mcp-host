@@ -293,7 +293,7 @@ test("an unknown op is refused with the list of the ones that exist", () => {
 	const r = handleFileOp({ op: "append", path: "/tmp/x" })
 	assert.equal(r.ok, false)
 	assert.equal(r.error, "bad_input")
-	assert.deepEqual(r.supported, ["read", "write", "edit"])
+	assert.deepEqual(r.supported, ["read", "write", "edit", "read_many", "read_image", "list", "glob", "grep"])
 })
 
 test("every failure carries a phase and one of the five recovery verbs", (t) => {
