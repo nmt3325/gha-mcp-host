@@ -66,7 +66,7 @@ moved by this repository change. The broker still dispatches to
 | `lib/control.mjs` | Enroll, the TTL lease, control actions, and the only tree kills. |
 | `vendor/process-utils.mjs` | Process-tree kill, vendored from `google-gemini/gemini-cli` (Apache-2.0). |
 | `third_party/*/LICENSE` | Upstream licence texts, verbatim. Provenance is in `VENDOR.md`. |
-| `.github/actions/run-agent/action.yml` | Shared setup: Node, Windows console encoding, git credentials, then run the agent in the foreground. |
+| `.github/actions/run-agent/action.yml` | Shared setup: Node, Windows console encoding, Git and gh credentials, then run the agent in the foreground. |
 | `.github/workflows/{linux,macos,windows}.yml` | One per platform, literal `runs-on`, `workflow_dispatch` only. |
 | `.github/workflows/probe.yml` | Gate 0. Measures long-GET tolerance and orphan behaviour on all three OSes before anything else is trusted. |
 | `.github/workflows/ci.yml` | Syntax and import checks, the tail-clock bounds test, the pwsh script-generation test, and the greps that enforce the invariants below. |
@@ -125,10 +125,25 @@ interpret them; `TERM=dumb` makes `tput` exit 3, which kills any script under
 multi-command input into surprise aborts.
 
 **Secrets are scrubbed from every child environment**: `BROKER_SECRET`,
-`GHA_MCP_*`, `GITHUB_TOKEN`, `ACTIONS_*`, `INPUT_*`. The PAT for private clones is
-never an environment variable -- it goes into a `GIT_CONFIG_GLOBAL` credential
-store file with mode 600, and is additionally redacted to `***` by the broker on
-the way back out.
+`GHA_MCP_*`, `GITHUB_TOKEN`, `GH_TOKEN`, `GH_PAT`, `ACTIONS_*`, `INPUT_*`.
+When the optional `GH_PAT` is supplied, the shared setup authenticates both HTTPS
+Git and `gh` on **Linux, macOS and Windows**. Git uses the file-backed helper
+selected by `GIT_CONFIG_GLOBAL`; `gh` receives the token on stdin during setup
+and stores it in an ephemeral `GH_CONFIG_DIR`, not in a token environment variable.
+The credential files use mode 600 and the gh directory mode 700 on POSIX systems.
+The broker additionally redacts the PAT to `***` on the way back out.
+
+Only the config paths are inherited by ordinary commands; the token environment
+variables remain scrubbed. Missing `gh` or a failed login fails the credential
+setup step when a PAT is supplied. With no PAT, setup does not log in to `gh` and
+only public Git clones are available. This setup applies to **new environments**;
+runners already executing an older checkout must be recreated to receive it.
+
+Use `gh auth status --hostname github.com` to inspect gh authentication. Git and
+gh use separate credential stores, so an unauthenticated gh does not by itself
+prove that Git HTTPS authentication is unavailable. Authentication does not add
+permissions: both tools remain limited by `GH_PAT` repository access and scopes,
+and repository branch protections still apply.
 
 ### Job layout on disk
 
@@ -157,7 +172,7 @@ Repository secrets (Settings -> Secrets and variables -> Actions):
 | --- | --- | --- |
 | `BROKER_URL` | yes | e.g. `https://gha-mcp.<subdomain>.workers.dev` |
 | `BROKER_SECRET` | yes | shared secret for the one-shot enroll HMAC; must match the broker's |
-| `GH_PAT` | no | fine-grained PAT if the agent needs to clone other private repos |
+| `GH_PAT` | no | fine-grained PAT for HTTPS Git and gh; grant only the repositories and operations the agent needs |
 
 The broker needs the mirror image: the same `BROKER_SECRET`, plus a fine-grained
 PAT owned by *this* account with **Actions: read and write** on *this* repository
