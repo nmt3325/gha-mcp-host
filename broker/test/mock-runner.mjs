@@ -178,6 +178,14 @@ async function startRunner(envId, runId, ttlMinutes) {
 				work_dir: "/tmp/gha-mcp/work",
 				run_url: `http://localhost/run/${runId}`,
 				mock: true,
+				// The broker refuses to mark an environment ready unless the runner
+				// published the shell its platform needs -- missingShell() in
+				// env-do.ts. A real runner probes for these at startup; the mock
+				// claims what its platform would have and nothing else, so that the
+				// readiness gate is exercised rather than bypassed.
+				shells: envId.startsWith("win-")
+					? { pwsh: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", cmd: "C:\\Windows\\System32\\cmd.exe", bash: null }
+					: { bash: "/bin/bash", sh: "/bin/sh", pwsh: null },
 			}),
 		}).catch(() => null)
 		if (res && res.ok) enrolled = await res.json()

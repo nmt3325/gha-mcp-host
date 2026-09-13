@@ -21,6 +21,12 @@ BASE="http://127.0.0.1:${PORT}"
 TOKEN="devtoken"
 SECRET="devsecret"
 MAX_SECONDS=55
+# The SDK's streamable-HTTP transport rejects a request whose Accept header does
+# not list both types, and replies in SSE frames rather than a bare JSON body.
+ACCEPT='accept: application/json, text/event-stream'
+# `mcp()` is always called inside $( ), so a variable it assigns dies with the
+# subshell. It reports its timing through a file instead.
+LAST_FILE="$(mktemp)"
 
 PASS=0
 FAIL=0
@@ -33,6 +39,7 @@ dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
 cleanup() {
 	[[ -n "${MOCK_PID:-}" ]] && kill "$MOCK_PID" 2>/dev/null
 	[[ -n "${DEV_PID:-}" ]] && kill "$DEV_PID" 2>/dev/null
+	rm -f "${LAST_FILE:-}"
 	wait 2>/dev/null
 }
 trap cleanup EXIT
@@ -68,7 +75,18 @@ sleep 1
 
 # --------------------------------------------------------------- helpers
 
-# mcp <tool> <json-args>  -> prints structuredContent, sets LAST_SECONDS
+# unsse <raw-body> -> the JSON-RPC reply, whether it arrived as JSON or as SSE.
+# Every assertion below treats a reply as plain JSON; this is the one place that
+# knows the transport may have framed it.
+unsse() {
+	printf '%s' "$1" | node -e '
+		let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+			if(!/^data:/m.test(s))return process.stdout.write(s)
+			process.stdout.write(s.split(/\r?\n/).filter(l=>l.startsWith("data:")).map(l=>l.slice(5).trim()).join(""))
+		})'
+}
+
+# mcp <tool> <json-args>  -> prints structuredContent, records seconds in $LAST_FILE
 mcp() {
 	RPC_ID=$((RPC_ID + 1))
 	local started ended
@@ -77,10 +95,12 @@ mcp() {
 	out=$(curl -sS -X POST "$BASE/mcp" \
 		-H "authorization: Bearer $TOKEN" \
 		-H 'content-type: application/json' \
+		-H "$ACCEPT" \
 		--max-time 120 \
 		-d "{\"jsonrpc\":\"2.0\",\"id\":$RPC_ID,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}")
 	ended=$(date +%s)
-	LAST_SECONDS=$((ended - started))
+	printf '%s' "$((ended - started))" > "$LAST_FILE"
+	out=$(unsse "$out")
 	printf '%s' "$out" | node -e '
 		let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 			try{const j=JSON.parse(s);process.stdout.write(JSON.stringify(j.result?.structuredContent ?? j))}
@@ -99,8 +119,6 @@ field() {
 		})' "$2"
 }
 
-b64() { printf '%s' "$1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(Buffer.from(s,"base64").toString("utf8")))'; }
-
 check() { # check <label> <condition-result> <detail>
 	if [[ "$2" == "1" ]]; then
 		PASS=$((PASS + 1)); green "  PASS  $1"
@@ -110,7 +128,9 @@ check() { # check <label> <condition-result> <detail>
 }
 
 check_time() { # the assertion that outranks all others
-	if [[ "$LAST_SECONDS" -le "$MAX_SECONDS" ]]; then
+	local LAST_SECONDS
+	LAST_SECONDS=$(cat "$LAST_FILE" 2>/dev/null || echo 0)
+	if [[ "${LAST_SECONDS:-0}" -le "$MAX_SECONDS" ]]; then
 		PASS=$((PASS + 1)); green "  PASS  $1 returned in ${LAST_SECONDS}s"
 	else
 		FAIL=$((FAIL + 1)); red   "  FAIL  $1 took ${LAST_SECONDS}s (> ${MAX_SECONDS}s: this is the -32001 failure)"
@@ -123,15 +143,15 @@ eq() { [[ "$1" == "$2" ]] && echo 1 || echo 0; }
 
 echo
 echo "== MCP protocol =="
-INIT=$(curl -sS -X POST "$BASE/mcp" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-	-d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}')
+INIT=$(unsse "$(curl -sS -X POST "$BASE/mcp" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -H "$ACCEPT" \
+	-d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}')")
 check "initialize returns a protocolVersion" "$(eq "$(field "$INIT" result.protocolVersion)" "2025-06-18")" "$INIT"
 
 UNAUTH=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/mcp" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
 check "unauthenticated /mcp is rejected" "$(eq "$UNAUTH" "401")" "got $UNAUTH"
 
-LIST=$(curl -sS -X POST "$BASE/mcp" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-	-d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+LIST=$(unsse "$(curl -sS -X POST "$BASE/mcp" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -H "$ACCEPT" \
+	-d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')")
 TOOL_COUNT=$(printf '%s' "$LIST" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(String(j.result.tools.length))})')
 check "tools/list exposes all 14 tools" "$(eq "$TOOL_COUNT" "14")" "got $TOOL_COUNT"
 
@@ -160,7 +180,7 @@ check "state is exited" "$(eq "$(field "$R" state)" "exited")" "$R"
 check "exit_code is 0" "$(eq "$(field "$R" exit_code)" "0")" "$R"
 check "returned_because is exit" "$(eq "$(field "$R" returned_because)" "exit")" "$R"
 check "eof is true" "$(eq "$(field "$R" eof)" "true")" "$R"
-check "output decodes" "$(b64 "$(field "$R" bytes)" | grep -q 'hello world' && echo 1 || echo 0)" "$(field "$R" bytes)"
+check "output carries the text" "$(printf '%s' "$(field "$R" output)" | grep -q 'hello world' && echo 1 || echo 0)" "$(field "$R" output)"
 check "poll_error is absent on the happy path" "$(eq "$(field "$R" poll_error)" "")" "$(field "$R" poll_error)"
 
 R=$(mcp execute "{\"env_id\":\"$ENV_ID\",\"command\":[\"sim:exit\",\"42\"]}")
@@ -242,7 +262,7 @@ check "the window is capped, not the job" "$(eq "$(field "$R" truncated)" "true"
 R=$(mcp poll_job "{\"env_id\":\"$ENV_ID\",\"job_id\":\"$BIG\",\"from_byte\":0,\"max_bytes\":65536,\"wait_ms\":15000}")
 check_time "poll_job of an evicted range"
 check "evicted bytes are re-served from the runner" \
-	"$(printf '%s' "$(field "$R" bytes)" | test "$(wc -c < /dev/stdin)" -gt 100 && echo 1 || echo 0)" \
+	"$(printf '%s' "$(field "$R" output)" | test "$(wc -c < /dev/stdin)" -gt 100 && echo 1 || echo 0)" \
 	"range_evicted=$(field "$R" range_evicted)"
 
 # --------------------------------------------------------------- runner death
@@ -266,8 +286,25 @@ mcp env_destroy "{\"env_id\":\"$DOOMED\"}" >/dev/null
 
 echo
 echo "== bad input is data, not a transport error =="
+# Two layers refuse bad input, and neither may surface as a JSON-RPC protocol
+# error. A malformed env_id never reaches the handler: the tool's own input
+# schema rejects it, and the SDK reports that as a result carrying isError,
+# which an agent can read and correct. env_id has been shape-checked this way
+# since the exec_* surface, so asking the handler for on_error here could never
+# have worked -- the well-shaped case below is the one the handler owns.
 R=$(mcp execute '{"env_id":"not-an-id","command":["sim:echo","x"]}')
-check "a malformed env_id fails cleanly" "$(eq "$(field "$R" ok)" "false")" "$R"
+check "a malformed env_id is refused by the schema" \
+	"$(printf '%s' "$R" | grep -q '"isError":true' && echo 1 || echo 0)" "$R"
+check "the refusal names the field it rejected" \
+	"$(printf '%s' "$R" | grep -q 'env_id' && echo 1 || echo 0)" "$R"
+check "a schema refusal is still a result, not a -32xxx" \
+	"$(printf '%s' "$R" | grep -q '"error":{"code":-' && echo 0 || echo 1)" "$R"
+
+# A well-shaped id for an environment that does not exist is the handler's own
+# case, and that one answers with data: ok false, a stop verdict, and retryable
+# as a strict boolean.
+R=$(mcp execute '{"env_id":"linux-zzzzzzzz","command":["sim:echo","x"]}')
+check "an unknown environment fails as data" "$(eq "$(field "$R" ok)" "false")" "$R"
 check "on_error says stop" "$(eq "$(field "$R" on_error)" "stop")" "$(field "$R" on_error)"
 check "retryable is a strict boolean false" "$(eq "$(field "$R" retryable)" "false")" "$(field "$R" retryable)"
 
