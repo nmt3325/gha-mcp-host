@@ -113,7 +113,7 @@ export function buildEnvTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 				{
 					hint: ready ? null : "the Actions job is queued; nothing is wrong yet. macOS queues longest.",
 					next_action: ready
-						? `exec(env_id: "${envId}", command: "uname -a")`
+						? `execute(env_id: "${envId}", command: ["uname", "-a"])`
 						: `env_status(env_id: "${envId}", wait_ready_ms: 45000)`,
 				},
 			)
@@ -158,7 +158,7 @@ export function buildEnvTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 								? String(snap.failure_reason || "dispatch or enroll failed")
 								: null,
 					next_action:
-						snap.state === "ready" ? "exec" : snap.state === "provisioning" ? "env_status" : "env_create",
+						snap.state === "ready" ? "execute" : snap.state === "provisioning" ? "env_status" : "env_create",
 				},
 			)
 		},
@@ -204,7 +204,7 @@ export function buildEnvTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 				{ environments: envs, count: envs.length },
 				{
 					hint: envs.length ? null : "nothing live; env_create one",
-					next_action: envs.length ? "exec" : "env_create",
+					next_action: envs.length ? "execute" : "env_create",
 				},
 			)
 		},

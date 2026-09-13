@@ -71,14 +71,70 @@ export async function tryCall<T = any>(
 
 export type ReturnedBecause = "exit" | "idle" | "deadline" | "cap" | "queued"
 
+/** The runner's own vocabulary. `queued` and `running` are the live ones. */
+const TERMINAL_STATES = new Set(["exited", "killed", "lost"])
+
+export function isTerminal(state: unknown): boolean {
+	return TERMINAL_STATES.has(String(state))
+}
+
 /**
- * exec and exec_read return the identical key set, always, with every field
- * present. A field that appears only in the interesting case forces the caller
- * to branch on key existence, and a caller that guesses wrong reports
- * "state: unknown" instead of what actually happened.
+ * The coarse status the caller branches on, which is the one local-mcp's
+ * clients already know: anything that is not finished is "running", including a
+ * job still queued behind another. The precise runner state stays alongside it
+ * as `state`, so nothing is lost by simplifying.
  */
-export function execResult(a: {
-	commandId: string
+export type JobStatus = "running" | "exited" | "killed" | "lost"
+
+export function statusOf(state: unknown): JobStatus {
+	const s = String(state)
+	if (s === "exited" || s === "killed" || s === "lost") return s
+	return "running"
+}
+
+export type RenderedText = {
+	text: string
+	/** Raw bytes covered. Add it to from_byte to get next_byte. Not text.length. */
+	rawBytes: number
+	partialLineDropped: boolean
+	forcedSplit: boolean
+	/** False when the window held bytes back, so eof cannot be claimed yet. */
+	fullyConsumed: boolean
+}
+
+/**
+ * THE cut site. renderWindow() is called here and nowhere else in the Worker,
+ * and broker-ci enforces that with a grep, because two places that decide where
+ * a window ends cannot be kept in agreement -- and the moment they disagree,
+ * re-reading the same offset stops returning the same bytes.
+ */
+export function renderText(bytesB64: unknown, eof: boolean, redact?: (s: string) => string): RenderedText {
+	const raw = b64decode(String(bytesB64 || ""))
+	const rendered = renderWindow(raw, { eof, redact })
+	return {
+		text: rendered.text,
+		rawBytes: rendered.rawBytes,
+		partialLineDropped: rendered.partialLineDropped,
+		forcedSplit: rendered.forcedSplit,
+		fullyConsumed: rendered.rawBytes >= raw.length,
+	}
+}
+
+/**
+ * execute, start_command, poll_job and stop_job's follow-up all return the
+ * identical key set, always, with every field present. A field that appears
+ * only in the interesting case forces the caller to branch on key existence,
+ * and a caller that guesses wrong reports "state: unknown" instead of what
+ * actually happened.
+ *
+ * Note what is NOT split here: stdout and stderr. The runner gives the child a
+ * single appending file descriptor for both, which is what removes the pipe
+ * deadlock this system was built to avoid, so `output` is the interleaved
+ * stream exactly as the command wrote it. local-mcp returns them separately;
+ * that difference is deliberate and cannot be undone downstream.
+ */
+export function jobResult(a: {
+	jobId: string
 	envId: string
 	platform: Platform
 	w: any | null
@@ -95,17 +151,14 @@ export function execResult(a: {
 }) {
 	const w = a.w
 	const state = (w?.state as string) || "queued"
-	const terminal = state === "exited" || state === "killed" || state === "lost"
+	const terminal = isTerminal(state)
 	const idleSeconds =
 		w?.last_output_at != null ? Math.max(0, Math.floor((Date.now() - w.last_output_at) / 1000)) : 0
 
-	// The single cut site in the system. See the INVARIANTS block in bytes.ts.
-	const raw = b64decode(String(w?.bytes_b64 || ""))
 	const startByte = Number(w?.start_byte ?? 0)
-	const rendered = renderWindow(raw, { eof: Boolean(w?.eof), redact: a.redact })
+	const rendered = renderText(w?.bytes_b64, Boolean(w?.eof), a.redact)
 	const nextByte = startByte + rendered.rawBytes
-	const fullyConsumed = rendered.rawBytes >= raw.length
-	const eof = Boolean(w?.eof) && fullyConsumed
+	const eof = Boolean(w?.eof) && rendered.fullyConsumed
 
 	const headDiscarded = Number(w?.head_discarded_bytes ?? 0)
 	const outputCapped = Boolean(w?.output_capped)
@@ -119,7 +172,7 @@ export function execResult(a: {
 		if (typeof cw === "string" && cw) warnings.push(cw)
 	}
 	if (rendered.partialLineDropped) {
-		warnings.push("a trailing partial line was withheld; the next exec_read starts exactly there")
+		warnings.push("a trailing partial line was withheld; the next poll_job starts exactly there")
 	}
 	if (rendered.forcedSplit) {
 		warnings.push(
@@ -128,7 +181,7 @@ export function execResult(a: {
 	}
 	if (w?.range_evicted) {
 		warnings.push(
-			`bytes before ${w.available_from_byte} are no longer buffered in the broker; exec_read pulls them from the runner on demand`,
+			`bytes before ${w.available_from_byte} are no longer buffered in the broker; poll_job pulls them from the runner on demand`,
 		)
 	}
 	if (headDiscarded > 0) {
@@ -138,7 +191,7 @@ export function execResult(a: {
 	}
 	if (outputCapped) {
 		warnings.push(
-			"this command hit its output cap and was killed for it, so the output ends where the cap was, not where the command would have. If the tail is what matters, re-run it piping through tail.",
+			"this command hit its output cap and was killed for it, so the output ends where the cap was, not where the command would have. If the tail is what matters, run it again through tail.",
 		)
 	}
 	if (!terminal && idleSeconds >= 300) {
@@ -149,36 +202,37 @@ export function execResult(a: {
 	let nextAction: string | null = null
 	if (state === "lost") {
 		// The runner's own agent_error reaches the warnings above now, so most lost
-		// commands explain themselves. This must therefore NOT lead with "retry":
-		// a precondition that failed -- a shell that is not installed, a cwd that
-		// cannot be created -- is permanent, and the old next_action of "exec with
-		// allow_duplicate: true" turned that into an infinite loop.
+		// jobs explain themselves. This must therefore NOT lead with "retry": a
+		// precondition that failed -- a program that is not installed, a cwd that
+		// cannot be created -- is permanent, and "just run it again" turns that
+		// into an infinite loop.
 		hint =
-			"the runner cannot account for this command. Read the warnings and output first: if they name a precondition that failed, it is permanent and re-running changes nothing. An unexplained lost means the runner died between claiming and spawning, and only then is re-running reasonable -- and only for an idempotent command."
-		nextAction = `exec_read(env_id: "${a.envId}", command_id: "${a.commandId}", from_byte: 0)`
+			"the runner cannot account for this job. Read the warnings and output first: if they name a precondition that failed, it is permanent and re-running changes nothing. An unexplained lost means the runner died between claiming and spawning, and only then is re-running reasonable -- and only for an idempotent command."
+		nextAction = `poll_job(env_id: "${a.envId}", job_id: "${a.jobId}", from_byte: 0)`
 	} else if (state === "queued") {
-		hint = `queued behind ${a.queuePosition} command(s); nothing is wrong, the runner is busy`
-		nextAction = `exec_read(env_id: "${a.envId}", command_id: "${a.commandId}", from_byte: 0, until: "any_output")`
+		hint = `queued behind ${a.queuePosition} job(s); nothing is wrong, the runner is busy`
+		nextAction = `poll_job(env_id: "${a.envId}", job_id: "${a.jobId}", from_byte: 0, until: "any_output")`
 	} else if (!terminal) {
 		hint = "still running; resume from next_byte"
-		nextAction = `exec_read(env_id: "${a.envId}", command_id: "${a.commandId}", from_byte: ${nextByte}, until: "exit")`
+		nextAction = `poll_job(env_id: "${a.envId}", job_id: "${a.jobId}", from_byte: ${nextByte}, until: "exit")`
 	} else if (!eof) {
 		hint = "finished, but you have not read all of the output yet"
-		nextAction = `exec_read(env_id: "${a.envId}", command_id: "${a.commandId}", from_byte: ${nextByte})`
+		nextAction = `poll_job(env_id: "${a.envId}", job_id: "${a.jobId}", from_byte: ${nextByte})`
 	}
 
 	return ok(
 		{
-			command_id: a.commandId,
+			job_id: a.jobId,
 			env_id: a.envId,
 			platform: a.platform,
+			status: statusOf(state),
 			state,
 			returned_because: a.returnedBecause,
 			exit_code: w?.exit_code ?? null,
 			runtime_ms: w?.runtime_ms ?? null,
 			idle_seconds: idleSeconds,
 			cwd: w?.cwd ?? a.stickyCwd,
-			text: rendered.text,
+			output: rendered.text,
 			start_byte: startByte,
 			next_byte: nextByte,
 			bytes_returned: rendered.rawBytes,

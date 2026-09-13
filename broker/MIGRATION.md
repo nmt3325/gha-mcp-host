@@ -49,7 +49,8 @@ Existing Worker secret values remain in Cloudflare: `GITHUB_PAT_DISPATCH`,
 where they are. No secret values belong in Git or this document. The manual
 workflow deliberately does not upload or overwrite Worker secrets.
 
-Validate `/healthz`, MCP authentication, and create / exec / read / destroy on
+Validate `/healthz`, MCP authentication, and create / execute / poll_job /
+read_file / destroy on
 Linux, macOS and Windows after a separately authorized cutover. Local checks
 and a dry-run bundle are not evidence that a live production cutover succeeded.
 Only then consider archiving the old broker repository as a separate action.
@@ -62,8 +63,18 @@ secrets and Durable Objects. Reverting Git alone does not undo a Cloudflare
 configuration change. For this PR before merge, simply close the PR; production
 has not been changed.
 
-## Validation limitation inherited from the source
+## What is and is not validated
 
-The broker has no Vitest test files. The preserved `test/e2e.sh` still contains
-an assertion for the removed deny layer; it is not counted as passed validation
-and should be refreshed before it is used as an acceptance gate.
+Vitest covers `src/argv.ts` (including a round trip through a real `bash`, so
+the quoting is checked against the shell rather than against itself) and
+`src/diff.ts`. The byte-window, job and file layers have no unit tests.
+
+`test/e2e.sh` was refreshed for the current tool names and for argv commands,
+and the stale deny-layer assertion was replaced with one that checks a command
+the broker cannot run is refused before it is queued. It still runs against
+`test/mock-runner.mjs`: a mock runner is evidence about the broker, never about
+a real runner.
+
+Nothing here was validated against a deployed Worker or a real GitHub Actions
+runner. `npx tsc --noEmit`, `npx vitest run` and a dry-run bundle passing are
+not a cutover.

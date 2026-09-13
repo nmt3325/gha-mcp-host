@@ -316,7 +316,7 @@ async function execLoop(envId, st, worker) {
 async function simulate(envId, st, cmd) {
 	const id = cmd.command_id
 	const job = st.jobs.get(id)
-	const text = String(cmd.command || "").trim()
+	const text = plainCommand(cmd.command)
 	const [, verb = "", rest = ""] = /^sim:(\w+)\s*(.*)$/s.exec(text) || []
 	const done = async (code, tail = "") => {
 		if (job.killed) return
@@ -393,3 +393,38 @@ gh.listen(GH_PORT, "127.0.0.1", () => {
 
 process.on("SIGINT", () => process.exit(0))
 process.on("SIGTERM", () => process.exit(0))
+
+/*
+ * The broker renders an argv array into a shell command line before enqueueing
+ * it, so what arrives here is `'sim:echo' 'hello'` rather than `sim:echo
+ * hello`. This is the exact inverse of that posix quoting, which keeps the sim:
+ * verbs matching on the argv the caller actually passed instead of on the
+ * broker's quoting of it.
+ */
+function plainCommand(line) {
+	const s = String(line || "").trim()
+	// pwsh command lines are prefixed with the call operator.
+	const body = s.startsWith("& ") ? s.slice(2) : s
+	if (!body.startsWith("'")) return body
+	const words = []
+	let i = 0
+	while (i < body.length) {
+		while (body[i] === " ") i++
+		if (i >= body.length) break
+		let word = ""
+		while (i < body.length && body[i] !== " ") {
+			if (body[i] === "'") {
+				i++
+				while (i < body.length && body[i] !== "'") word += body[i++]
+				i++
+			} else if (body[i] === "\\") {
+				word += body[i + 1] ?? ""
+				i += 2
+			} else {
+				word += body[i++]
+			}
+		}
+		words.push(word)
+	}
+	return words.join(" ")
+}

@@ -59,15 +59,29 @@ export type ToolDef = {
  * is what we want -- but `ok()` and `fail()` return different key sets today,
  * so a single schema would have to be a union loose enough to validate nothing
  * useful. The fix is to give every tool one key set with every field always
- * present (the invariant exec/exec_read already follow) and then declare an
+ * present (the invariant execute/poll_job already follow) and then declare an
  * exact schema. That refactor plus outputSchema is M2; the zod major is no
  * longer an open question, since the build resolves zod 4.
  */
+/**
+ * Reserved payload key for native MCP content items.
+ *
+ * A tool that has something to return which is not JSON -- get_image returns an
+ * actual image -- puts the content items on this key. toResult() moves them
+ * into `content` and strips the key, so a megabyte of base64 is sent once, as
+ * an image, instead of appearing again inside structuredContent and a third
+ * time inside the JSON text.
+ */
+export const MCP_CONTENT_KEY = "_mcp_content"
+
 function toResult(payload: Record<string, unknown>) {
 	const failed = payload.ok === false
+	const { [MCP_CONTENT_KEY]: attached, ...rest } = payload
+	const extra: any[] = Array.isArray(attached) ? attached : []
+	const content: any[] = [{ type: "text" as const, text: JSON.stringify(rest) }, ...extra]
 	return {
-		content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-		structuredContent: payload,
+		content,
+		structuredContent: rest,
 		...(failed ? { isError: true } : {}),
 	}
 }
