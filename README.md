@@ -193,6 +193,12 @@ once, the questions the design rests on:
 
 ## Status
 
-M1: shell only -- `env_create`, `env_status`, `env_list`, `env_destroy`,
-`env_extend`, `exec`, `exec_read`, `exec_kill`. File editing in M1 is
-`exec` + base64 + `git apply`; dedicated edit tools come in M2.
+Tools: `env_create`, `env_status`, `env_list`, `env_destroy`, `env_extend`,
+`execute`, `start_command`, `poll_job`, `stop_job`, `without_sandbox`,
+`read_file`, `write_file`, `list_directory`, `get_image`.
+
+Commands are argv arrays -- there is no shell in between unless you ask for one
+with `["bash", "-lc", ...]` -- and they run **unconfined**. The disposable
+runner is the isolation boundary, so there is no in-VM sandbox and
+`without_sandbox` is only an alias of `execute`, kept for clients written
+against local-mcp.

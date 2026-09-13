@@ -104,7 +104,11 @@ test("HTTP, MCP, enrollment, execution, SSE and restart work without Cloudflare"
   const initialized = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } })
   assert.equal(initialized.result.protocolVersion, "2025-06-18")
   const listed = await rpc("tools/list")
-  for (const name of ["env_create", "env_status", "env_list", "env_extend", "env_destroy", "exec", "exec_read", "exec_kill"]) {
+  for (const name of [
+    "env_create", "env_status", "env_list", "env_extend", "env_destroy",
+    "execute", "start_command", "poll_job", "stop_job", "without_sandbox",
+    "read_file", "write_file", "list_directory", "get_image",
+  ]) {
     assert.ok(listed.result.tools.some((tool) => tool.name === name), name)
   }
 
@@ -129,14 +133,19 @@ test("HTTP, MCP, enrollment, execution, SSE and restart work without Cloudflare"
   assert.equal((await hello()).status, 409, "enrollment must remain one-shot")
   assert.equal((await fetch(`${broker.origin}/agent/${envId}/next`, { headers: { authorization: `Bearer ${settings.MCP_AUTH_TOKEN}` } })).status, 401)
 
-  async function runCommand(text, delay = 0, progress = false) {
-    const pending = tool("exec", { env_id: envId, command: text, deadline_ms: 12000, idle_return_ms: 10000 }, progress ? { progressToken: "test-progress" } : undefined)
+  // The broker quotes every argv element, so the runner never sees a command
+  // line it has to re-split. Asserting on the rendered form is what keeps that
+  // honest: a regression to string commands would change this.
+  const quote = (word) => "'" + word.split("'").join("'\\''") + "'"
+  const rendered = (argv) => argv.map(quote).join(" ")
+  async function runCommand(argv, delay = 0, progress = false) {
+    const pending = tool("execute", { env_id: envId, command: argv, wait_ms: 12000 }, progress ? { progressToken: "test-progress" } : undefined)
     let claimed
     for (let attempt = 0; attempt < 5 && !claimed; attempt++) {
       claimed = (await agent("next?wait=1&worker=0", agentToken)).command
     }
-    assert.ok(claimed, "exec must enqueue a claimable command")
-    assert.equal(claimed.command, text)
+    assert.ok(claimed, "execute must enqueue a claimable command")
+    assert.equal(claimed.command, rendered(argv), "the runner must receive the argv, quoted")
     if (delay) await sleep(delay)
     const output = Buffer.from("hello from the runner\n")
     await agent("chunk", agentToken, {
@@ -145,25 +154,25 @@ test("HTTP, MCP, enrollment, execution, SSE and restart work without Cloudflare"
     })
     const result = await pending
     assert.equal(result.result.structuredContent.state, "exited", JSON.stringify(result))
-    assert.equal(result.result.structuredContent.text, output.toString())
+    assert.equal(result.result.structuredContent.output, output.toString())
     if (progress) assert.ok(result.messages.some((message) => message.method === "notifications/progress"), JSON.stringify(result.messages))
     return result.result.structuredContent
   }
-  const executed = await runCommand("echo example")
-  const reread = (await tool("exec_read", { env_id: envId, command_id: executed.command_id, from_byte: 0 })).result.structuredContent
-  assert.equal(reread.text, executed.text)
+  const executed = await runCommand(["echo", "example"])
+  const reread = (await tool("poll_job", { env_id: envId, job_id: executed.job_id, from_byte: 0 })).result.structuredContent
+  assert.equal(reread.output, executed.output)
   assert.deepEqual(Object.keys(reread).sort(), Object.keys(executed).sort())
-  const deduped = (await tool("exec", { env_id: envId, command: "echo example", deadline_ms: 12000, idle_return_ms: 10000 })).result.structuredContent
+  const deduped = (await tool("execute", { env_id: envId, command: ["echo", "example"], wait_ms: 12000 })).result.structuredContent
   assert.equal(deduped.deduped, true)
-  assert.equal(deduped.command_id, executed.command_id)
-  await runCommand("echo progress", 5300, true)
+  assert.equal(deduped.job_id, executed.job_id)
+  await runCommand(["echo", "progress"], 5300, true)
 
   await broker.close()
   broker = await startServer(env)
   assert.ok(broker.origin)
-  const restored = (await tool("exec_read", { env_id: envId, command_id: executed.command_id, from_byte: 0 })).result.structuredContent
+  const restored = (await tool("poll_job", { env_id: envId, job_id: executed.job_id, from_byte: 0 })).result.structuredContent
   assert.equal(restored.state, "exited")
-  assert.equal(restored.text, executed.text, "terminal output must survive process restart")
+  assert.equal(restored.output, executed.output, "terminal output must survive process restart")
   const status = (await tool("env_status", { env_id: envId })).result.structuredContent
   assert.equal(status.state, "ready")
   assert.equal((await agent("control", agentToken, { wait: 1, running: [] })).destroy, false)

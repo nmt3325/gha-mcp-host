@@ -20,7 +20,7 @@ export const ENV_ID_RE = /^(linux|mac|win)-[0-9a-hjkmnp-tv-z]{8}$/
 const ENV_ID_HELP =
 	"Environment id returned by env_create, shaped like linux-a1b2c3d4, mac-a1b2c3d4 or win-a1b2c3d4. Call env_list if you do not have one."
 
-const EnvIdField = z.string().regex(ENV_ID_RE, ENV_ID_HELP).describe(ENV_ID_HELP)
+export const EnvIdField = z.string().regex(ENV_ID_RE, ENV_ID_HELP).describe(ENV_ID_HELP)
 
 export const PlatformSchema = z.enum(["linux", "macos", "windows"])
 
@@ -80,95 +80,160 @@ export const EnvDestroyInput = z.strictObject({
 	force: z.boolean().optional().describe("Destroy even if another session created it."),
 })
 
-/* ------------------------------------------------------------------ exec_* */
+/* ---------------------------------------------------------------- commands */
 
 const EnvValue = z.union([z.string(), z.number(), z.boolean()])
 
-export const ExecInput = z.strictObject({
+const COMMAND_HELP =
+	'The command as an argv array: ["git", "commit", "-m", "a message"]. Element 0 is the program, the rest are its arguments, and every element is passed through verbatim. There is no shell in between, so |, >, &&, *, ~ and $VAR are ordinary characters here -- when you want them interpreted, run the shell yourself: ["bash", "-lc", "make 2>&1 | tail -40"].'
+
+const CommandField = z.array(z.string()).min(1).describe(COMMAND_HELP)
+
+const CwdField = z
+	.string()
+	.optional()
+	.describe(
+		"Working directory for this command only. Relative paths resolve against the environment's sticky cwd, which persists between calls.",
+	)
+
+const EnvField = z
+	.record(z.string(), EnvValue)
+	.optional()
+	.describe("Extra environment variables for this command. Non-string values are stringified.")
+
+const TimeoutField = z
+	.number()
+	.optional()
+	.describe("Kill the command after this many seconds. Default 3600, and further clamped to the remaining lease.")
+
+const AllowDuplicateField = z
+	.boolean()
+	.optional()
+	.describe(
+		"Run it even if an identical command is already in flight. Without this, a repeat of the same argv within the dedupe window returns the first job instead of starting a second one, which is what makes a retry after a client timeout safe.",
+	)
+
+const LabelField = z.string().optional().describe("Short human label for env_status listings.")
+
+const JobIdField = z.string().min(1).describe("job_id returned by execute or start_command.")
+
+export const ExecuteInput = z.strictObject({
 	env_id: EnvIdField,
-	command: z
-		.string()
-		.regex(/\S/, "command must contain something other than whitespace")
-		.describe("Shell source. Multiple lines are fine; it is written to a script file and run, not passed with -c."),
-	shell: z
-		.enum(["bash", "sh", "zsh", "pwsh", "cmd"])
+	command: CommandField,
+	cwd: CwdField,
+	env: EnvField,
+	timeout_s: TimeoutField,
+	wait_ms: z
+		.number()
 		.optional()
 		.describe(
-			"Default: bash on linux and macos, pwsh on windows. env_status(verbose) lists what this runner actually has; asking for one it does not have is refused up front rather than silently substituted.",
-		),
-	cwd: z.string().optional().describe("Override the sticky cwd for this command only."),
-	env: z
-		.record(z.string(), EnvValue)
-		.optional()
-		.describe("Extra environment variables for this command. Non-string values are stringified."),
-	stdin_b64: z
-		.string()
-		.optional()
-		.describe(
-			"Base64-encoded stdin. The RUNNER decodes it and gives the command the raw bytes on fd 0, so do not decode it again inside the command. To write a file byte-exactly: `cat > path` on posix, or `[Console]::In.ReadToEnd()` with Set-Content on pwsh.",
+			"How long to wait for the command to finish before handing back a job_id instead. Default 30000, max 45000: past that the MCP client itself times out and the job_id is lost.",
 		),
 	max_bytes: z
 		.number()
 		.optional()
-		.describe(
-			"Output bytes to return. Default 65536, max 262144, minimum 1024 -- anything smaller is raised to that floor and then cut back to the last whole line, so a tiny value still returns roughly a kilobyte.",
-		),
-	deadline_ms: z
-		.number()
-		.optional()
-		.describe("How long to wait before returning partial output. Default 20000, max 45000."),
-	idle_return_ms: z.number().optional().describe("Return early after this much silence. Default 1500."),
-	timeout_s: z
-		.number()
-		.optional()
-		.describe("Kill the command after this long. Default 3600, and further clamped to the remaining lease."),
-	inactivity_kill_s: z.number().optional().describe("Kill after this much silence. Default 0, meaning never."),
-	label: z.string().optional().describe("Short human label for env_status listings."),
-	idempotency_key: z
-		.string()
-		.optional()
-		.describe(
-			"Dedupe key for retries of ONE call. A second exec with the same key returns the first command instead of running twice, but only while that command is still in flight (deadline_ms + 60s). Once it has finished, the same key starts a new command.",
-		),
-	allow_duplicate: z
-		.boolean()
-		.optional()
-		.describe(
-			"Bypass dedupe. Before using this on a command that came back 'lost', read its output: a precondition failure is permanent and will simply fail again.",
-		),
-	keep_raw: z.boolean().optional().describe("Keep the runner's output file after exit, for debugging."),
+		.describe("Output bytes to return. Default 65536, max 262144, minimum 1024."),
+	allow_duplicate: AllowDuplicateField,
+	label: LabelField,
 })
 
-export const ExecReadInput = z.strictObject({
+/** without_sandbox is an alias of execute; see tools-run.ts for why. */
+export const WithoutSandboxInput = ExecuteInput
+
+export const StartCommandInput = z.strictObject({
 	env_id: EnvIdField,
-	command_id: z.string().min(1).describe("command_id returned by exec."),
+	command: CommandField,
+	cwd: CwdField,
+	env: EnvField,
+	timeout_s: TimeoutField,
+	allow_duplicate: AllowDuplicateField,
+	label: LabelField,
+})
+
+export const PollJobInput = z.strictObject({
+	env_id: EnvIdField,
+	job_id: JobIdField,
 	from_byte: z
 		.number()
 		.optional()
-		.describe("Byte offset to resume from. Pass next_byte from the previous call. Re-reading an old offset is safe."),
+		.describe(
+			"Byte offset to resume the output from. Pass next_byte from the previous call. Re-reading an offset you already read is always safe and returns the same bytes.",
+		),
 	max_bytes: z.number().optional().describe("Default 65536, max 262144, minimum 1024."),
-	wait_ms: z.number().optional().describe("Default 20000, max 45000."),
+	wait_ms: z
+		.number()
+		.optional()
+		.describe("How long to wait for something to happen before answering anyway. Default 20000, max 45000."),
 	until: z
 		.enum(["any_output", "exit"])
 		.optional()
-		.describe("'any_output' returns as soon as there is anything new; 'exit' waits for the command to finish. Default any_output."),
+		.describe(
+			"'any_output' returns as soon as there is anything new; 'exit' waits for the job to finish. Default any_output.",
+		),
 })
 
-export const ExecKillInput = z.strictObject({
+export const StopJobInput = z.strictObject({
 	env_id: EnvIdField,
-	command_id: z
+	job_id: z
 		.string()
 		.min(1)
 		.describe(
-			"A command_id, or the literal string 'all'. 'all' is only accepted here -- it is not a command_id you can later pass to exec_read.",
+			"A job_id, or the literal string 'all'. 'all' is accepted only here -- it is not a job_id you can later poll.",
 		),
 	signal: z.enum(["TERM", "KILL"]).optional().describe("Default TERM, which escalates to KILL after 3s."),
+})
+
+/* ------------------------------------------------------------------- files */
+
+const PathField = z.string().min(1).max(4096).describe("Absolute path, or relative to the sticky cwd.")
+
+export const ReadFileInput = z.strictObject({
+	env_id: EnvIdField,
+	path: PathField,
+	offset: z.number().optional().describe("First line to return, 0-based. A negative offset reads the tail."),
+	limit: z.number().optional().describe("How many lines to return. Default 2000."),
+	from_byte: z.number().optional().describe("Resume from this byte offset instead of the start."),
+	max_bytes: z.number().optional().describe("Bytes to transfer. Default 65536, max 131072."),
+	deadline_ms: z.number().optional().describe("How long to wait for the runner. Default 20000, max 45000."),
+})
+
+export const WriteFileInput = z.strictObject({
+	env_id: EnvIdField,
+	path: PathField,
+	content: z
+		.string()
+		.describe("The complete new contents of the file, as text. This replaces the file; it does not append."),
+	base_sha: z
+		.string()
+		.optional()
+		.describe(
+			"sha256 of the file you based this write on, from read_file. The write is refused if the file changed since. Usually unnecessary: write_file reads the file itself immediately beforehand and uses that.",
+		),
+	create_parents: z.boolean().optional().describe("Create missing parent directories. Default false."),
+	deadline_ms: z.number().optional().describe("How long to wait for the runner. Default 20000, max 45000."),
+})
+
+export const ListDirectoryInput = z.strictObject({
+	env_id: EnvIdField,
+	path: PathField,
+	deadline_ms: z.number().optional().describe("How long to wait for the runner. Default 20000, max 45000."),
+})
+
+export const GetImageInput = z.strictObject({
+	env_id: EnvIdField,
+	path: PathField,
+	deadline_ms: z.number().optional().describe("How long to wait for the runner. Default 30000, max 45000."),
 })
 
 export type EnvCreateArgs = z.infer<ReturnType<typeof envCreateInput>>
 export type EnvExtendArgs = z.infer<ReturnType<typeof envExtendInput>>
 export type EnvStatusArgs = z.infer<typeof EnvStatusInput>
 export type EnvDestroyArgs = z.infer<typeof EnvDestroyInput>
-export type ExecArgs = z.infer<typeof ExecInput>
-export type ExecReadArgs = z.infer<typeof ExecReadInput>
-export type ExecKillArgs = z.infer<typeof ExecKillInput>
+export type ExecuteArgs = z.infer<typeof ExecuteInput>
+export type StartCommandArgs = z.infer<typeof StartCommandInput>
+export type PollJobArgs = z.infer<typeof PollJobInput>
+export type StopJobArgs = z.infer<typeof StopJobInput>
+export type ReadFileArgs = z.infer<typeof ReadFileInput>
+export type WriteFileArgs = z.infer<typeof WriteFileInput>
+export type ListDirectoryArgs = z.infer<typeof ListDirectoryInput>
+export type GetImageArgs = z.infer<typeof GetImageInput>

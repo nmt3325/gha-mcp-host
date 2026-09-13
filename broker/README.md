@@ -24,10 +24,11 @@ An MCP request is cancelled after **60 seconds** by default. Anything slower
 comes back to the caller as `MCP error -32001: Request timed out`, and a build,
 a test run or an `npm install` is routinely slower than that.
 
-So no tool here waits for a command to finish. `exec` starts the command,
-returns whatever output exists when its deadline is near, and hands back a byte
-offset. `exec_read` resumes from that offset. Output is addressed **by absolute
-byte range**, like HTTP Range, with no server-side cursor anywhere:
+So no tool here waits for a command to finish. `execute` starts the command,
+waits up to `wait_ms` (30s by default), returns whatever output exists by then,
+and hands back a `job_id` with a byte offset. `poll_job` resumes from that
+offset. Output is addressed **by absolute byte range**, like HTTP Range, with no
+server-side cursor anywhere:
 
 - Re-reading the same `{from_byte, max_bytes}` returns the same bytes. A client
   that just lost a response to a timeout can simply ask again.
@@ -50,11 +51,18 @@ treated as a bonus, never as a requirement.
 | `env_list` | Every live environment this broker knows about |
 | `env_extend` | Push the lease out, up to the hard cap from creation |
 | `env_destroy` | Cancel the run and release the environment |
-| `exec` | Start a command, return the first window of output |
-| `exec_read` | Read any byte range of a command's output |
-| `exec_kill` | Kill one command, or all of them, with the whole process tree |
+| `execute` | Run an argv command, wait up to `wait_ms`, return the first window of output |
+| `start_command` | Start an argv command in the background, return a `job_id` at once |
+| `poll_job` | Read any byte range of a job's output, optionally waiting for exit |
+| `stop_job` | Stop one job, or all of them, with the whole process tree |
+| `without_sandbox` | Alias of `execute`; nothing here is sandboxed to begin with |
+| `read_file` | Read a UTF-8 text file, with a `base_sha` for conditional writes |
+| `write_file` | Replace a text file atomically and report a unified diff |
+| `list_directory` | One directory, sorted, with directories marked by a trailing `/` |
+| `get_image` | Read an image out of the runner and return it as an image |
 
-Every `exec` and `exec_read` result has the **same key set**, always, with every
+Every `execute`, `start_command` and `poll_job` result has the **same key set**,
+always, with every
 field present -- `state`, `exit_code`, `text`, `start_byte`, `next_byte`, `eof`,
 `killed_reason`, `poll_error` and the rest. A field that appears only in the
 interesting case forces the caller to branch on key existence, and a caller that
@@ -70,8 +78,11 @@ Run multiple environments at once and address each one by its `env_id`:
 | `src/index.ts` | Routes. `/mcp` for clients, `/agent/:envId/*` for runners |
 | `src/mcp.ts` | Tool registration, progress heartbeat, error shaping |
 | `src/tools-env.ts` | Environment lifecycle tools |
-| `src/tools-exec.ts` | `exec`, `exec_read`, `exec_kill` |
-| `src/tools-shared.ts` | The shared result shape both exec tools return |
+| `src/tools-run.ts` | `execute`, `start_command`, `poll_job`, `stop_job`, `without_sandbox` |
+| `src/tools-fs.ts` | `read_file`, `write_file`, `list_directory`, `get_image` |
+| `src/tools-shared.ts` | The shared result shape every job tool returns |
+| `src/argv.ts` | argv to one command line, with per-platform quoting |
+| `src/diff.ts` | The unified diff `write_file` reports |
 | `src/schemas.ts` | Zod input schemas, one source of truth per tool |
 | `src/env-do.ts` | `EnvDO`: one Durable Object per environment |
 | `src/env-schema.ts` | Its SQL schema and migrations |
@@ -111,8 +122,9 @@ npx wrangler deploy --dry-run --outdir dist
 
 npm 11.19.1 is used to avoid the observed Node 22 bundled npm 10.9.8 peer-resolver
 `edgesOut` crash. There is no committed lockfile yet, so these workflows use
-`npm install`, not `npm ci`. The current broker has no Vitest test files;
-`--passWithNoTests` is not evidence of a passing unit suite.
+`npm install`, not `npm ci`. The Vitest suite covers `src/argv.ts` (including a
+round trip through a real `bash`) and `src/diff.ts`; the byte-window and tool
+layers are still only exercised by `test/e2e.sh` against a mock runner.
 
 Worker secrets:
 
@@ -150,6 +162,19 @@ are the ones that hold regardless of what runs: a short lease, a disposable
 runner, a create-rate limit, and a token scoped to one repository. See
 `src/config.ts`.
 
+**No sandbox around the command.** local-mcp confines a command with Landlock on
+Linux and Seatbelt on macOS. This broker does not, because the unit of isolation
+is one level up: an environment IS a throwaway runner that holds nothing of ours
+and is destroyed with the job. A second, weaker boundary inside it would buy no
+safety and would mostly produce commands that fail for reasons the caller cannot
+see. `without_sandbox` exists only so a client written against local-mcp finds
+the tool it expects; it is the same handler as `execute`.
+
+**No separate stdout and stderr.** The runner hands the child one appending file
+descriptor for both, which is what removes the pipe deadlock this design exists
+to avoid. Nothing downstream can tell them apart again, so `output` is the
+interleaved stream as the command wrote it.
+
 **No reattach-to-a-live-stream protocol.** Every design that keeps a mutable
 read position on the server breaks the moment a request is cancelled at 60
 seconds, because the client cannot tell whether the read it lost had already
@@ -157,8 +182,10 @@ moved the cursor.
 
 ## Status
 
-M1: shells only. File editing tools, `outputSchema` declarations and disk
-reclaim are M2.
+Commands and files are both covered. Still open: `outputSchema` declarations,
+disk reclaim, and `file_edit`-style exact-string editing -- the runner keeps its
+`edit` op, but no tool is wired to it, so an edit is a `read_file` plus a
+`write_file` today.
 
 Provenance and third-party attribution for everything vendored or ported are in
 [`VENDOR.md`](./VENDOR.md).
