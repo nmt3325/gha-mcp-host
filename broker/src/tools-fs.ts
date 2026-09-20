@@ -1,5 +1,5 @@
 /*
- * The file lane: read_file, write_file, list_directory, get_image.
+ * The file lane: read_file, write_file, list_directory, get_image, get_file.
  *
  * read_file and write_file are queue jobs, not a new transport. A file job is
  * enqueued with type:"file", claimed by the same worker as a command, and its
@@ -14,7 +14,7 @@
  *    normal queue entry: poll_job(job_id) resumes it. Nothing is lost, which is
  *    why running out of time here is not reported as a failure.
  *
- * list_directory and get_image take the other route and run a command, because
+ * list_directory, get_image and get_file take the other route and run a command, because
  * a file job's result is pushed as a single chunk with no re-readable raw file
  * behind it: that caps it at one window, which an image immediately exceeds.
  *
@@ -32,10 +32,12 @@ import { unifiedDiff } from "./diff"
 import { MCP_CONTENT_KEY, type ToolDef } from "./mcp"
 import { Deadline, SOFT_CAP_MS, clamp, fail, makePollClock, numArg, ok } from "./result"
 import {
+	GetFileInput,
 	GetImageInput,
 	ListDirectoryInput,
 	ReadFileInput,
 	WriteFileInput,
+	type GetFileArgs,
 	type GetImageArgs,
 	type ListDirectoryArgs,
 	type ReadFileArgs,
@@ -64,6 +66,13 @@ const RESULT_POLL_MAX_MS = 2_000
  * first: Worker memory and whatever the client will accept in a single message.
  */
 const MAX_IMAGE_B64_CHARS = 2_100_000
+
+/**
+ * Generic files ride in one MCP embedded-resource result. Five MiB matches a
+ * Free workspace's per-file ceiling and keeps the base64 response below 7 MiB.
+ */
+const MAX_FILE_BYTES = 5 * 1024 * 1024
+const MAX_FILE_B64_CHARS = Math.ceil(MAX_FILE_BYTES / 3) * 4
 
 /** The runner's 5 recovery verbs, mapped onto the broker's on_error verb. */
 const ON_ERROR_FOR: Record<string, "retry" | "stop"> = {
@@ -282,8 +291,112 @@ function sniffImage(b: Uint8Array): string | null {
 	}
 	if (b.length >= 2 && at(0) === 0x42 && at(1) === 0x4d) return "image/bmp"
 	if (b.length >= 4 && ((at(0) === 0x49 && at(1) === 0x49) || (at(0) === 0x4d && at(1) === 0x4d))) return "image/tiff"
-	if (b.length >= 12 && at(4) === 0x66 && at(5) === 0x74 && at(6) === 0x79 && at(7) === 0x70) return "image/avif"
+	if (b.length >= 12 && at(4) === 0x66 && at(5) === 0x74 && at(6) === 0x79 && at(7) === 0x70) {
+		const brand = String.fromCharCode(at(8), at(9), at(10), at(11))
+		if (brand === "avif" || brand === "avis") return "image/avif"
+	}
 	return null
+}
+
+
+const MIME_BY_EXTENSION: Record<string, string> = {
+	"7z": "application/x-7z-compressed",
+	aac: "audio/aac",
+	avi: "video/x-msvideo",
+	bmp: "image/bmp",
+	bz2: "application/x-bzip2",
+	css: "text/css",
+	csv: "text/csv",
+	doc: "application/msword",
+	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	epub: "application/epub+zip",
+	flac: "audio/x-flac",
+	gif: "image/gif",
+	gz: "application/gzip",
+	gzip: "application/gzip",
+	heic: "image/heic",
+	htm: "text/html",
+	html: "text/html",
+	ico: "image/vnd.microsoft.icon",
+	jpeg: "image/jpeg",
+	jpg: "image/jpeg",
+	js: "application/javascript",
+	json: "application/json",
+	m4a: "audio/mp4",
+	markdown: "text/markdown",
+	md: "text/markdown",
+	mkv: "video/x-matroska",
+	mov: "video/quicktime",
+	mp3: "audio/mpeg",
+	mp4: "video/mp4",
+	odp: "application/vnd.oasis.opendocument.presentation",
+	ods: "application/vnd.oasis.opendocument.spreadsheet",
+	odt: "application/vnd.oasis.opendocument.text",
+	ogg: "audio/ogg",
+	opus: "audio/ogg",
+	pdf: "application/pdf",
+	png: "image/png",
+	ppt: "application/vnd.ms-powerpoint",
+	pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	py: "text/x-python",
+	rar: "application/vnd.rar",
+	rtf: "application/rtf",
+	svg: "image/svg+xml",
+	tar: "application/x-tar",
+	tif: "image/tiff",
+	tiff: "image/tiff",
+	ts: "application/typescript",
+	tsv: "text/tab-separated-values",
+	txt: "text/plain",
+	wav: "audio/wav",
+	webm: "video/webm",
+	webp: "image/webp",
+	xls: "application/vnd.ms-excel",
+	xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	xml: "application/xml",
+	yaml: "text/yaml",
+	yml: "text/yaml",
+	zip: "application/zip",
+}
+
+function fileNameFromPath(given: string): string {
+	const parts = given.replace(/\\/g, "/").split("/").filter(Boolean)
+	return parts[parts.length - 1] || "download.bin"
+}
+
+function hasPrefix(bytes: Uint8Array, prefix: number[]): boolean {
+	return prefix.every((value, index) => bytes[index] === value)
+}
+
+function sniffFileMime(bytes: Uint8Array, fileName: string): string {
+	const image = sniffImage(bytes)
+	if (image) return image
+
+	const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : ""
+	const extensionMime = MIME_BY_EXTENSION[ext]
+	if (hasPrefix(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) return "application/pdf"
+	if (hasPrefix(bytes, [0x1f, 0x8b])) return "application/gzip"
+	if (hasPrefix(bytes, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) return "application/x-7z-compressed"
+	if (hasPrefix(bytes, [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07])) return "application/vnd.rar"
+	if (hasPrefix(bytes, [0x50, 0x4b, 0x03, 0x04])) {
+		// Office Open XML and EPUB are ZIP containers; the extension carries the
+		// useful subtype while the signature proves that it is at least a ZIP.
+		return extensionMime || "application/zip"
+	}
+	if (
+		bytes.length >= 12 &&
+		hasPrefix(bytes, [0x52, 0x49, 0x46, 0x46]) &&
+		bytes[8] === 0x57 && bytes[9] === 0x41 && bytes[10] === 0x56 && bytes[11] === 0x45
+	) return "audio/wav"
+	if (bytes.length >= 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+		return extensionMime || "video/mp4"
+	}
+	return extensionMime || "application/octet-stream"
+}
+
+async function sha256Bytes(bytes: Uint8Array): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", bytes)
+	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
 export function buildFsTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
@@ -294,7 +407,7 @@ export function buildFsTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 			"Read a UTF-8 text file from the environment. Addressed two ways at once: offset/limit select lines (a negative offset reads the tail), from_byte/max_bytes bound how much is transferred. Line numbers are never mixed into the text. " +
 			"Returns base_sha, the sha256 of the whole file, which write_file uses to refuse a write built on a stale read. " +
 			"End of file is the ABSENCE of next_byte; while next_byte is present there is more to read. " +
-			"Binary files and invalid UTF-8 are refused rather than mangled -- use get_image for images, or base64 through execute. " +
+			"Binary files and invalid UTF-8 are refused rather than mangled -- use get_file to return the original, or get_image when the client should inspect an image. " +
 			"CRLF and a leading BOM are measured and reported, never silently normalised.",
 		inputSchema: ReadFileInput,
 		readOnly: true,
@@ -578,5 +691,101 @@ export function buildFsTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 		},
 	}
 
-	return [readFile, writeFile, listDirectory, getImage]
+
+	const getFile: ToolDef = {
+		name: "get_file",
+		title: "Return a file to the MCP client",
+		description:
+			"Read any file out of the environment and return its bytes as a native MCP embedded resource, so the client can present or save the original file instead of base64 text. " +
+			"The filename defaults to the path basename and the MIME type is detected from magic bytes and extension; either can be overridden. " +
+			"The whole file travels inline in one response and is integrity-checked with SHA-256. The ceiling is 5 MiB; for a larger artifact, split or shrink it first.",
+		inputSchema: GetFileInput,
+		readOnly: true,
+		async handler(args: GetFileArgs, ctx) {
+			const envId = args.env_id
+			const platform = platformOf(envId)
+			const deadlineMs = clamp(numArg(args.deadline_ms, 30000), 1000, 45000)
+
+			const cap = await runCapture(
+				env,
+				cfg,
+				envId,
+				base64Command(platform, args.path),
+				{
+					label: "get_file",
+					timeoutS: 180,
+					deadlineMs,
+					maxChars: MAX_FILE_B64_CHARS,
+					note: "encoding the file on the runner",
+				},
+				ctx,
+			)
+			if (!cap.ok) return cap.payload
+
+			if (cap.exitCode !== 0) {
+				const why = cap.text.trim().slice(0, 300)
+				const missing = /No such file|cannot find|does not exist/i.test(why)
+				return fail(missing ? "not_found" : "io_error", why || `the file could not be read (exit ${cap.exitCode})`, {
+					on_error: "stop",
+					extra: { env_id: envId, job_id: cap.jobId, path: args.path, exit_code: cap.exitCode },
+					warnings: cap.warnings,
+				})
+			}
+
+			const data = cap.text.replace(/[\s\uFEFF]+/g, "")
+			if (data && !/^[A-Za-z0-9+/=]+$/.test(data)) {
+				return fail("io_error", "the encoder wrote something other than base64, so the file cannot be trusted", {
+					on_error: "stop",
+					extra: { env_id: envId, job_id: cap.jobId, path: args.path, output_head: cap.text.slice(0, 200) },
+					warnings: cap.warnings,
+					hint: "read the job's output with poll_job to see what the runner printed",
+				})
+			}
+
+			let raw: Uint8Array
+			try {
+				raw = b64decode(data)
+			} catch {
+				return fail("io_error", "the base64 the runner produced did not decode", {
+					on_error: "stop",
+					extra: { env_id: envId, job_id: cap.jobId, path: args.path },
+					warnings: cap.warnings,
+				})
+			}
+			if (raw.length > MAX_FILE_BYTES) {
+				return fail("bad_input", `the file is ${raw.length} bytes; get_file supports at most ${MAX_FILE_BYTES}`, {
+					on_error: "stop",
+					extra: { env_id: envId, job_id: cap.jobId, path: args.path, bytes: raw.length, limit_bytes: MAX_FILE_BYTES },
+					warnings: cap.warnings,
+					hint: "split or shrink the file on the runner, then call get_file again",
+					next_action: "execute",
+				})
+			}
+
+			const fileName = args.file_name || fileNameFromPath(args.path)
+			const mime = args.mime_type || sniffFileMime(raw, fileName)
+			const sha256 = await sha256Bytes(raw)
+			const uri = `gha-mcp://file/${encodeURIComponent(envId)}/${encodeURIComponent(fileName)}`
+
+			return ok(
+				{
+					env_id: envId,
+					job_id: cap.jobId,
+					platform,
+					path: args.path,
+					file_name: fileName,
+					mime_type: mime,
+					bytes: raw.length,
+					sha256,
+					uri,
+					// The bytes ride once as a native MCP embedded resource. They do not
+					// appear in structuredContent or in the JSON text copy.
+					[MCP_CONTENT_KEY]: [{ type: "resource", resource: { uri, mimeType: mime, blob: data } }],
+				},
+				{ warnings: cap.warnings },
+			)
+		},
+	}
+
+	return [readFile, writeFile, listDirectory, getImage, getFile]
 }

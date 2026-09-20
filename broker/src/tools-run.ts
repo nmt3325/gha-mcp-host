@@ -347,7 +347,7 @@ export function buildRunTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 		"The command runs UNCONFINED -- no filesystem or network sandbox -- because the environment is already a disposable VM that is destroyed with the job. " +
 		"output is stdout and stderr interleaved into one stream, as the command wrote it, with ANSI escapes stripped and addressed by byte offset. " +
 		"A non-zero exit_code is returned as data, not raised as an error. cwd persists between calls in the same environment. " +
-		"For binary output, base64 it inside the command, or use get_image for images."
+		"For binary output, use get_file to return the original file, or get_image when the client should inspect an image."
 
 	async function executeHandler(args: ExecuteArgs, ctx: { signal: AbortSignal; note: (m: string) => void }) {
 		const envId = args.env_id

@@ -67,7 +67,8 @@ export type ToolDef = {
  * Reserved payload key for native MCP content items.
  *
  * A tool that has something to return which is not JSON -- get_image returns an
- * actual image -- puts the content items on this key. toResult() moves them
+ * actual image and get_file returns an embedded resource -- puts the content
+ * items on this key. toResult() moves them
  * into `content` and strips the key, so a megabyte of base64 is sent once, as
  * an image, instead of appearing again inside structuredContent and a third
  * time inside the JSON text.

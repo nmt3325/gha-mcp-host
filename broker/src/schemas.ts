@@ -225,6 +225,25 @@ export const GetImageInput = z.strictObject({
 	deadline_ms: z.number().optional().describe("How long to wait for the runner. Default 30000, max 45000."),
 })
 
+export const GetFileInput = z.strictObject({
+	env_id: EnvIdField,
+	path: PathField,
+	file_name: z
+		.string()
+		.min(1)
+		.max(255)
+		.regex(/^[^/\\]+$/)
+		.optional()
+		.describe("Download filename. Defaults to the basename of path; directory separators are not allowed."),
+	mime_type: z
+		.string()
+		.min(1)
+		.max(255)
+		.optional()
+		.describe("MIME type override. Defaults to magic-byte and extension detection."),
+	deadline_ms: z.number().optional().describe("How long to wait for the runner. Default 30000, max 45000."),
+})
+
 export type EnvCreateArgs = z.infer<ReturnType<typeof envCreateInput>>
 export type EnvExtendArgs = z.infer<ReturnType<typeof envExtendInput>>
 export type EnvStatusArgs = z.infer<typeof EnvStatusInput>
@@ -237,3 +256,4 @@ export type ReadFileArgs = z.infer<typeof ReadFileInput>
 export type WriteFileArgs = z.infer<typeof WriteFileInput>
 export type ListDirectoryArgs = z.infer<typeof ListDirectoryInput>
 export type GetImageArgs = z.infer<typeof GetImageInput>
+export type GetFileArgs = z.infer<typeof GetFileInput>
