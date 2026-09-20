@@ -153,7 +153,7 @@ check "unauthenticated /mcp is rejected" "$(eq "$UNAUTH" "401")" "got $UNAUTH"
 LIST=$(unsse "$(curl -sS -X POST "$BASE/mcp" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -H "$ACCEPT" \
 	-d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')")
 TOOL_COUNT=$(printf '%s' "$LIST" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(String(j.result.tools.length))})')
-check "tools/list exposes all 14 tools" "$(eq "$TOOL_COUNT" "14")" "got $TOOL_COUNT"
+check "tools/list exposes all 15 tools" "$(eq "$TOOL_COUNT" "15")" "got $TOOL_COUNT"
 
 # --------------------------------------------------------------- lifecycle
 

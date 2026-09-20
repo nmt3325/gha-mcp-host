@@ -195,7 +195,7 @@ once, the questions the design rests on:
 
 Tools: `env_create`, `env_status`, `env_list`, `env_destroy`, `env_extend`,
 `execute`, `start_command`, `poll_job`, `stop_job`, `without_sandbox`,
-`read_file`, `write_file`, `list_directory`, `get_image`.
+`read_file`, `write_file`, `list_directory`, `get_image`, `get_file`.
 
 Commands are argv arrays -- there is no shell in between unless you ask for one
 with `["bash", "-lc", ...]` -- and they run **unconfined**. The disposable

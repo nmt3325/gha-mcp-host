@@ -60,6 +60,7 @@ treated as a bonus, never as a requirement.
 | `write_file` | Replace a text file atomically and report a unified diff |
 | `list_directory` | One directory, sorted, with directories marked by a trailing `/` |
 | `get_image` | Read an image out of the runner and return it as an image |
+| `get_file` | Return any file up to 5 MiB as a native MCP embedded resource |
 
 Every `execute`, `start_command` and `poll_job` result has the **same key set**,
 always, with every
@@ -79,7 +80,7 @@ Run multiple environments at once and address each one by its `env_id`:
 | `src/mcp.ts` | Tool registration, progress heartbeat, error shaping |
 | `src/tools-env.ts` | Environment lifecycle tools |
 | `src/tools-run.ts` | `execute`, `start_command`, `poll_job`, `stop_job`, `without_sandbox` |
-| `src/tools-fs.ts` | `read_file`, `write_file`, `list_directory`, `get_image` |
+| `src/tools-fs.ts` | `read_file`, `write_file`, `list_directory`, `get_image`, `get_file` |
 | `src/tools-shared.ts` | The shared result shape every job tool returns |
 | `src/argv.ts` | argv to one command line, with per-platform quoting |
 | `src/diff.ts` | The unified diff `write_file` reports |
@@ -182,7 +183,7 @@ moved the cursor.
 
 ## Status
 
-Commands and files are both covered. Still open: `outputSchema` declarations,
+Commands, text files, images and downloadable files up to 5 MiB are covered. Still open: `outputSchema` declarations,
 disk reclaim, and `file_edit`-style exact-string editing -- the runner keeps its
 `edit` op, but no tool is wired to it, so an edit is a `read_file` plus a
 `write_file` today.

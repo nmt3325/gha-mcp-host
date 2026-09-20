@@ -107,7 +107,7 @@ test("HTTP, MCP, enrollment, execution, SSE and restart work without Cloudflare"
   for (const name of [
     "env_create", "env_status", "env_list", "env_extend", "env_destroy",
     "execute", "start_command", "poll_job", "stop_job", "without_sandbox",
-    "read_file", "write_file", "list_directory", "get_image",
+    "read_file", "write_file", "list_directory", "get_image", "get_file",
   ]) {
     assert.ok(listed.result.tools.some((tool) => tool.name === name), name)
   }
