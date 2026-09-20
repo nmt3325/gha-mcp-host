@@ -594,9 +594,9 @@ export function buildFsTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 		name: "get_image",
 		title: "Read an image file",
 		description:
-			"Read an image out of the environment and return it as an image, not as text -- use this for screenshots, plots and rendered output. " +
-			"The format is detected from the file's magic bytes, so the extension does not have to be right, and a file that is not a recognised image is refused instead of being handed back as garbage. " +
-			"Roughly 1.5 MB is the ceiling: the whole image travels inline in one response. If a file is larger, downscale it on the runner with execute first.",
+			"Read an image out of the environment and return it as native image content -- use this for screenshots, plots and rendered output. " +
+			"The format is detected from magic bytes. For compatibility with clients that cached the older tool catalog, a non-image is returned as a native embedded resource, the same payload as get_file. " +
+			"Images keep the roughly 1.5 MB ceiling; generic embedded files can be up to 5 MiB.",
 		inputSchema: GetImageInput,
 		readOnly: true,
 		async handler(args: GetImageArgs, ctx) {
@@ -613,8 +613,8 @@ export function buildFsTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 					label: "get_image",
 					timeoutS: 120,
 					deadlineMs,
-					maxChars: MAX_IMAGE_B64_CHARS,
-					note: "encoding the image on the runner",
+					maxChars: MAX_FILE_B64_CHARS,
+					note: "encoding the file on the runner",
 				},
 				ctx,
 			)
@@ -635,14 +635,7 @@ export function buildFsTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 			// stray character is the only safe read: silently dropping it would decode
 			// to a subtly corrupt image.
 			const data = cap.text.replace(/[\s\uFEFF]+/g, "")
-			if (!data) {
-				return fail("io_error", "the file encoded to nothing; it is empty or unreadable", {
-					on_error: "stop",
-					extra: { env_id: envId, path: args.path },
-					warnings: cap.warnings,
-				})
-			}
-			if (!/^[A-Za-z0-9+/=]+$/.test(data)) {
+			if (data && !/^[A-Za-z0-9+/=]+$/.test(data)) {
 				return fail("io_error", "the encoder wrote something other than base64, so the image cannot be trusted", {
 					on_error: "stop",
 					extra: { env_id: envId, job_id: cap.jobId, path: args.path, output_head: cap.text.slice(0, 200) },
@@ -664,12 +657,40 @@ export function buildFsTools(env: Bindings, cfg: BrokerConfig): ToolDef[] {
 
 			const mime = sniffImage(raw)
 			if (!mime) {
-				return fail("bad_input", "this file is not a png, jpeg, gif, webp, bmp, tiff or avif image", {
+				const fileName = fileNameFromPath(args.path)
+				const fileMime = sniffFileMime(raw, fileName)
+				const sha256 = await sha256Bytes(raw)
+				const uri = `gha-mcp://file/${encodeURIComponent(envId)}/${encodeURIComponent(fileName)}`
+				return ok(
+					{
+						env_id: envId,
+						job_id: cap.jobId,
+						platform,
+						path: args.path,
+						file_name: fileName,
+						mime_type: fileMime,
+						bytes: raw.length,
+						sha256,
+						uri,
+						compatibility_route: "get_image",
+						[MCP_CONTENT_KEY]: [{ type: "resource", resource: { uri, mimeType: fileMime, blob: data } }],
+					},
+					{
+						warnings: [
+							...cap.warnings,
+							"this client used the get_image compatibility route; refresh the MCP connection to expose get_file directly",
+						],
+					},
+				)
+			}
+
+			if (data.length > MAX_IMAGE_B64_CHARS) {
+				return fail("bad_input", "the image is too large to return as native image content", {
 					on_error: "stop",
 					extra: { env_id: envId, path: args.path, bytes: raw.length },
 					warnings: cap.warnings,
-					hint: "read text with read_file; convert other formats on the runner first",
-					next_action: `read_file(env_id: "${envId}", path: "${args.path}")`,
+					hint: "downscale the image on the runner, or rename it only if it should be treated as a generic file",
+					next_action: "execute",
 				})
 			}
 

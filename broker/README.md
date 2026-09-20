@@ -59,7 +59,7 @@ treated as a bonus, never as a requirement.
 | `read_file` | Read a UTF-8 text file, with a `base_sha` for conditional writes |
 | `write_file` | Replace a text file atomically and report a unified diff |
 | `list_directory` | One directory, sorted, with directories marked by a trailing `/` |
-| `get_image` | Read an image out of the runner and return it as an image |
+| `get_image` | Return an image, or a generic embedded file for clients with a cached tool catalog |
 | `get_file` | Return any file up to 5 MiB as a native MCP embedded resource |
 
 Every `execute`, `start_command` and `poll_job` result has the **same key set**,

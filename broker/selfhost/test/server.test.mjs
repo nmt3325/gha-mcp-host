@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { createServer, request as httpRequest } from "node:http"
-import { createHmac } from "node:crypto"
+import { createHash, createHmac } from "node:crypto"
 import { once } from "node:events"
 import { mkdtempSync, rmSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -132,6 +132,35 @@ test("HTTP, MCP, enrollment, execution, SSE and restart work without Cloudflare"
   assert.ok(agentToken)
   assert.equal((await hello()).status, 409, "enrollment must remain one-shot")
   assert.equal((await fetch(`${broker.origin}/agent/${envId}/next`, { headers: { authorization: `Bearer ${settings.MCP_AUTH_TOKEN}` } })).status, 401)
+
+  // A generic binary file must cross the MCP boundary exactly once as a native
+  // embedded resource, both through get_file and the cached-client get_image route.
+  const fileBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff])
+  const fileBase64 = fileBytes.toString("base64")
+  for (const toolName of ["get_file", "get_image"]) {
+    const filePending = tool(toolName, { env_id: envId, path: "/tmp/artifact.zip" })
+    let fileClaimed
+    for (let attempt = 0; attempt < 5 && !fileClaimed; attempt++) {
+      fileClaimed = (await agent("next?wait=1&worker=0", agentToken)).command
+    }
+    assert.ok(fileClaimed, `${toolName} must enqueue a claimable encoder command`)
+    assert.equal(fileClaimed.command, "base64 -w 0 -- '/tmp/artifact.zip'")
+    const encodedOutput = Buffer.from(fileBase64)
+    await agent("chunk", agentToken, {
+      command_id: fileClaimed.command_id, start_byte: 0, bytes_b64: encodedOutput.toString("base64"),
+      total_bytes: encodedOutput.length, state: "exited", exit_code: 0, eof: true, cwd_after: "/tmp/test",
+    })
+    const fileResult = (await filePending).result
+    assert.equal(fileResult.structuredContent.file_name, "artifact.zip")
+    assert.equal(fileResult.structuredContent.mime_type, "application/zip")
+    assert.equal(fileResult.structuredContent.bytes, fileBytes.length)
+    assert.equal(fileResult.structuredContent.sha256, createHash("sha256").update(fileBytes).digest("hex"))
+    assert.equal(fileResult.content[1].type, "resource")
+    assert.equal(fileResult.content[1].resource.mimeType, "application/zip")
+    assert.equal(fileResult.content[1].resource.blob, fileBase64)
+    assert.equal(fileResult.structuredContent._mcp_content, undefined)
+    assert.equal(fileResult.content[0].text.includes(fileBase64), false, "base64 must not be duplicated into JSON text")
+  }
 
   // The broker quotes every argv element, so the runner never sees a command
   // line it has to re-split. Asserting on the rendered form is what keeps that
