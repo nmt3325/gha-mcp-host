@@ -1,10 +1,13 @@
 # gha-mcp-host
 
-Runner half of **gha-mcp**: ephemeral Linux / macOS / Windows shell environments for
-an AI agent, provisioned as GitHub Actions jobs and driven over MCP.
+The **gha-mcp** monorepo: ephemeral Linux / macOS / Windows shell environments
+for an AI agent, provisioned as GitHub Actions jobs and driven over MCP.
 
-The MCP server itself lives in `nmt3325/gha-mcp-broker`. This repository contains
-only what runs *on* the runner.
+The runner stays at the repository root; the Cloudflare Worker MCP server lives
+in [`broker/`](./broker/README.md). The canonical repository for both is
+`fmdntracker/gha-mcp-host`. See [`broker/MIGRATION.md`](./broker/MIGRATION.md) for
+the separate, manual production cutover. Merging code does not change the
+Cloudflare project's Git connection or deploy the Worker.
 
 ```
 AI ──MCP──▶ broker (Cloudflare Worker + Durable Object)
@@ -22,36 +25,35 @@ including macOS. On the Free plan a private repository gets 2,000 minutes/month,
 and macOS bills at 10x, which works out to roughly 200 usable macOS minutes a
 month -- not enough to be useful.
 
-Being public is safe here because of one property, and it is the only thing
-protecting the repository:
+The workflows that start remote-compute environments (`linux.yml`, `macos.yml`,
+`windows.yml` and `probe.yml`) are **`workflow_dispatch` only**. Do not add
+`pull_request`, `pull_request_target` or `issue_comment` triggers to them.
 
-> **Every workflow is `workflow_dispatch` only.**
-
-Fork pull requests get a read-only `GITHUB_TOKEN` and no access to secrets, and
-`workflow_dispatch` requires write access to the repository, so a fork cannot
-dispatch these workflows or reach `BROKER_SECRET`. Adding `pull_request`,
-`pull_request_target`, or `issue_comment` to any workflow here destroys that
-property. Do not do it.
+Runner and broker CI may run on pull requests with `contents: read`, no repository
+secrets and no persisted checkout credentials. CI never starts an MCP environment
+or deploys a Worker. The optional `broker-deploy.yml` is manual-only, defaults to
+a dry run and permits deployment only from this repository's `main` branch.
 
 ## Why this repository is not a fork
 
-This is a standalone repository with its own history. That is deliberate:
-GitHub disables Actions on forked repositories by default, and `workflow_dispatch`
-is the only entry point this repository has -- so a fork starts out unable to do
-the one thing it exists for, and keeps an upstream relationship that means
-nothing for compute. A fresh repository is dispatchable as soon as its secrets
-are set.
+The canonical repository remains standalone, with its existing history and
+Actions setup. A contributor fork is only a place to propose a pull request;
+it is not the runner execution target and does not replace this repository.
 
-It also lives under a **different GitHub account** from the broker repository.
-Running Actions as general-purpose compute is the workload most likely to trip an
-account-level suspension, and an isolated owner keeps that blast radius off the
-primary account. The broker learns about that account from a single variable
-(`GITHUB_OWNER`), so moving again is one line plus a new PAT.
+Both code trees now live under `fmdntracker`. This deliberately removes the old
+split between the broker's source owner and the runner's source owner. The
+Cloudflare account, Worker name, Durable Objects and deployed secrets are not
+moved by this repository change. The broker still dispatches to
+`fmdntracker/gha-mcp-host` at `main`, through `GITHUB_OWNER`, `GITHUB_REPO` and
+`GITHUB_REF` in `broker/wrangler.toml`.
 
 ## Files
 
 | Path | Role |
 | --- | --- |
+| `broker/` | Cloudflare Worker, Durable Objects, MCP server and broker development documentation. |
+| `.github/workflows/broker-ci.yml` | Broker typecheck, validation, invariant checks and dry-run bundle from `broker/`. |
+| `.github/workflows/broker-deploy.yml` | Optional manual deployment; does not synchronize or overwrite secrets. |
 | `agent.mjs` | Entry point: role dispatch, plus the invariants worth reading before editing anything. |
 | `lib/config.mjs` | Platform detection, configuration, on-disk layout, tunable constants. |
 | `lib/util.mjs` | Small helpers, and the ENOSPC evidence guard. |
@@ -64,7 +66,7 @@ primary account. The broker learns about that account from a single variable
 | `lib/control.mjs` | Enroll, the TTL lease, control actions, and the only tree kills. |
 | `vendor/process-utils.mjs` | Process-tree kill, vendored from `google-gemini/gemini-cli` (Apache-2.0). |
 | `third_party/*/LICENSE` | Upstream licence texts, verbatim. Provenance is in `VENDOR.md`. |
-| `.github/actions/run-agent/action.yml` | Shared setup: Node, Windows console encoding, git credentials, then run the agent in the foreground. |
+| `.github/actions/run-agent/action.yml` | Shared setup: Node, Windows console encoding, Git and gh credentials, then run the agent in the foreground. |
 | `.github/workflows/{linux,macos,windows}.yml` | One per platform, literal `runs-on`, `workflow_dispatch` only. |
 | `.github/workflows/probe.yml` | Gate 0. Measures long-GET tolerance and orphan behaviour on all three OSes before anything else is trusted. |
 | `.github/workflows/ci.yml` | Syntax and import checks, the tail-clock bounds test, the pwsh script-generation test, and the greps that enforce the invariants below. |
@@ -123,10 +125,25 @@ interpret them; `TERM=dumb` makes `tput` exit 3, which kills any script under
 multi-command input into surprise aborts.
 
 **Secrets are scrubbed from every child environment**: `BROKER_SECRET`,
-`GHA_MCP_*`, `GITHUB_TOKEN`, `ACTIONS_*`, `INPUT_*`. The PAT for private clones is
-never an environment variable -- it goes into a `GIT_CONFIG_GLOBAL` credential
-store file with mode 600, and is additionally redacted to `***` by the broker on
-the way back out.
+`GHA_MCP_*`, `GITHUB_TOKEN`, `GH_TOKEN`, `GH_PAT`, `ACTIONS_*`, `INPUT_*`.
+When the optional `GH_PAT` is supplied, the shared setup authenticates both HTTPS
+Git and `gh` on **Linux, macOS and Windows**. Git uses the file-backed helper
+selected by `GIT_CONFIG_GLOBAL`; `gh` receives the token on stdin during setup
+and stores it in an ephemeral `GH_CONFIG_DIR`, not in a token environment variable.
+The credential files use mode 600 and the gh directory mode 700 on POSIX systems.
+The broker additionally redacts the PAT to `***` on the way back out.
+
+Only the config paths are inherited by ordinary commands; the token environment
+variables remain scrubbed. Missing `gh` or a failed login fails the credential
+setup step when a PAT is supplied. With no PAT, setup does not log in to `gh` and
+only public Git clones are available. This setup applies to **new environments**;
+runners already executing an older checkout must be recreated to receive it.
+
+Use `gh auth status --hostname github.com` to inspect gh authentication. Git and
+gh use separate credential stores, so an unauthenticated gh does not by itself
+prove that Git HTTPS authentication is unavailable. Authentication does not add
+permissions: both tools remain limited by `GH_PAT` repository access and scopes,
+and repository branch protections still apply.
 
 ### Job layout on disk
 
@@ -155,7 +172,7 @@ Repository secrets (Settings -> Secrets and variables -> Actions):
 | --- | --- | --- |
 | `BROKER_URL` | yes | e.g. `https://gha-mcp.<subdomain>.workers.dev` |
 | `BROKER_SECRET` | yes | shared secret for the one-shot enroll HMAC; must match the broker's |
-| `GH_PAT` | no | fine-grained PAT if the agent needs to clone other private repos |
+| `GH_PAT` | no | fine-grained PAT for HTTPS Git and gh; grant only the repositories and operations the agent needs |
 
 The broker needs the mirror image: the same `BROKER_SECRET`, plus a fine-grained
 PAT owned by *this* account with **Actions: read and write** on *this* repository
@@ -176,6 +193,12 @@ once, the questions the design rests on:
 
 ## Status
 
-M1: shell only -- `env_create`, `env_status`, `env_list`, `env_destroy`,
-`env_extend`, `exec`, `exec_read`, `exec_kill`. File editing in M1 is
-`exec` + base64 + `git apply`; dedicated edit tools come in M2.
+Tools: `env_create`, `env_status`, `env_list`, `env_destroy`, `env_extend`,
+`execute`, `start_command`, `poll_job`, `stop_job`, `without_sandbox`,
+`read_file`, `write_file`, `list_directory`, `get_image`, `get_file`.
+
+Commands are argv arrays -- there is no shell in between unless you ask for one
+with `["bash", "-lc", ...]` -- and they run **unconfined**. The disposable
+runner is the isolation boundary, so there is no in-VM sandbox and
+`without_sandbox` is only an alias of `execute`, kept for clients written
+against local-mcp.
